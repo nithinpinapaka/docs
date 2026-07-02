@@ -8,9 +8,41 @@
     "dark": "#15803D"
   },
   "favicon": "/favicon.svg",
+  "mobileIcon": "/images/icon-512.png",
   "navigation": {
     "tabs": [
-     
+      {
+        "tab": "Guides",
+        "groups": [
+          {
+            "group": "Get Started",
+            "pages": [
+              "index",
+              "quickstart",
+              "development"
+            ]
+          },
+          {
+            "group": "Essentials",
+            "pages": [
+              "essentials/markdown",
+              "essentials/code",
+              "essentials/images",
+              "essentials/navigation",
+              "essentials/reusable-snippets",
+              "essentials/settings"
+            ]
+          },
+          {
+            "group": "AI Tools",
+            "pages": [
+              "ai-tools/claude-code",
+              "ai-tools/cursor",
+              "ai-tools/windsurf"
+            ]
+          }
+        ]
+      },
       {
         "tab": "API reference",
         "groups": [
