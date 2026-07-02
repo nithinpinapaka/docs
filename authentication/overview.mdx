@@ -1,0 +1,48 @@
+---
+title: "Authentication Overview"
+description: "Understand how authentication works with access tokens, refresh tokens, and session management"
+icon: "lock"
+---
+
+Authentication controls who can access your API and for how long. This guide explains the token-based flow used across all endpoints.
+
+## How it works
+
+<Steps>
+  <Step title="User logs in">
+    The client sends credentials (email + password, OAuth code, etc.) to the `/auth/login` endpoint.
+  </Step>
+  <Step title="Server issues tokens">
+    On success, the server returns an **access token** (short-lived) and a **refresh token** (long-lived).
+  </Step>
+  <Step title="Client uses the access token">
+    Every API request must include the access token in the `Authorization` header.
+  </Step>
+  <Step title="Client refreshes when needed">
+    When the access token expires, the client uses the refresh token to obtain a new pair without asking the user to log in again.
+  </Step>
+  <Step title="Session ends">
+    When the user logs out, the server invalidates the refresh token so it can no longer be used.
+  </Step>
+</Steps>
+
+## Token types
+
+| Token | Lifetime | Purpose |
+|-------|----------|---------|
+| Access token | 15 minutes | Authenticate individual API requests |
+| Refresh token | 30 days | Obtain a new access token without re-authentication |
+
+## Next steps
+
+<CardGroup cols={2}>
+  <Card title="Access tokens" icon="key" href="/authentication/access-tokens">
+    Learn how to obtain and send access tokens.
+  </Card>
+  <Card title="Refresh tokens" icon="rotate" href="/authentication/refresh-tokens">
+    Keep sessions alive without interrupting users.
+  </Card>
+  <Card title="Session management" icon="shield" href="/authentication/session-management">
+    View active sessions and revoke access.
+  </Card>
+</CardGroup>

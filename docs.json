@@ -8,6 +8,7 @@
     "dark": "#15803D"
   },
   "favicon": "/favicon.svg",
+  "mobileIcon": "/images/icon-512.png",
   "navigation": {
     "tabs": [
       {
@@ -38,6 +39,15 @@
               "ai-tools/claude-code",
               "ai-tools/cursor",
               "ai-tools/windsurf"
+            ]
+          },
+          {
+            "group": "Authentication",
+            "pages": [
+              "authentication/overview",
+              "authentication/access-tokens",
+              "authentication/refresh-tokens",
+              "authentication/session-management"
             ]
           }
         ]
