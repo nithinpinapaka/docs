@@ -1,0 +1,63 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>PWA Auth App</title>
+  <link rel="manifest" href="/manifest.webmanifest">
+  <link rel="icon" type="image/png" href="/icons/icon-192.png">
+  <link rel="apple-touch-icon" href="/icons/icon-192.png">
+  <meta name="theme-color" content="#005871">
+  <style>
+    * { box-sizing: border-box; margin: 0; }
+    body { font-family: system-ui, sans-serif; background: #f4f6f8; color: #1a2b33; padding: 1.5rem; max-width: 640px; margin: 0 auto; }
+    h1 { font-size: 1.4rem; margin-bottom: 1rem; }
+    h2 { font-size: 1rem; margin-bottom: .75rem; }
+    .card { background: #fff; border-radius: 12px; padding: 1.25rem; margin-bottom: 1rem; box-shadow: 0 1px 3px rgba(0,0,0,.08); }
+    input { width: 100%; padding: .6rem .75rem; margin-bottom: .6rem; border: 1px solid #ccd5da; border-radius: 8px; font-size: 1rem; }
+    button { padding: .55rem 1rem; border: 0; border-radius: 8px; background: #005871; color: #fff; font-size: .95rem; cursor: pointer; margin: .15rem .3rem .15rem 0; }
+    button.secondary { background: #e3e9ec; color: #1a2b33; }
+    button.danger { background: #b3312d; }
+    button:disabled { opacity: .5; cursor: default; }
+    .session { display: flex; justify-content: space-between; align-items: center; gap: .5rem; padding: .6rem 0; border-bottom: 1px solid #eef1f3; font-size: .88rem; }
+    .session:last-child { border-bottom: 0; }
+    .session .meta { color: #5b6b73; font-size: .78rem; }
+    .badge { background: #07C983; color: #fff; border-radius: 6px; padding: .1rem .45rem; font-size: .72rem; }
+    #status { font-size: .85rem; color: #5b6b73; min-height: 1.2em; margin-bottom: 1rem; }
+    .hidden { display: none; }
+  </style>
+</head>
+<body>
+  <h1>PWA Auth App</h1>
+  <p id="status"></p>
+
+  <div id="login-view" class="card">
+    <h2>Log in</h2>
+    <input id="email" type="email" autocomplete="username" placeholder="Email" value="demo@example.com">
+    <input id="password" type="password" autocomplete="current-password" placeholder="Password" value="demo1234">
+    <button id="login-btn">Log in</button>
+  </div>
+
+  <div id="app-view" class="hidden">
+    <div class="card">
+      <h2>Account</h2>
+      <p id="whoami" style="margin-bottom:.75rem;font-size:.9rem;"></p>
+      <button id="logout-btn" class="secondary">Log out</button>
+      <button id="logout-all-btn" class="danger">Log out everywhere</button>
+    </div>
+
+    <div class="card">
+      <h2>Push notifications</h2>
+      <button id="enable-push-btn">Enable push</button>
+      <button id="test-push-btn" class="secondary" disabled>Send test notification</button>
+    </div>
+
+    <div class="card">
+      <h2>Active sessions</h2>
+      <div id="sessions"></div>
+    </div>
+  </div>
+
+  <script src="/app.js"></script>
+</body>
+</html>
