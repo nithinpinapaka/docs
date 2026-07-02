@@ -3,6 +3,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
+import { createClient } from '@supabase/supabase-js';
 import cookieParser from 'cookie-parser';
 import express from 'express';
 import jwt from 'jsonwebtoken';
@@ -15,6 +16,28 @@ const JWT_SECRET = process.env.JWT_SECRET || crypto.randomBytes(32).toString('he
 const ACCESS_TOKEN_TTL = '15m';
 const REFRESH_TOKEN_TTL_MS = 30 * 24 * 60 * 60 * 1000; // 30 days
 const IS_PROD = process.env.NODE_ENV === 'production';
+
+// ---------------------------------------------------------------------------
+// Supabase client (service-role key: server-side only, bypasses RLS)
+// ---------------------------------------------------------------------------
+const { SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY } = process.env;
+if (!SUPABASE_URL || !SUPABASE_SERVICE_ROLE_KEY) {
+  console.error(
+    'Missing SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY.\n' +
+    'Copy .env.example to .env, fill in your Supabase project credentials,\n' +
+    'and apply db/schema.sql in the Supabase SQL editor first.',
+  );
+  process.exit(1);
+}
+const db = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, {
+  auth: { persistSession: false, autoRefreshToken: false },
+});
+
+// Throws on any query error so route handlers can rely on try/catch → 500
+function unwrap({ data, error }) {
+  if (error) throw new Error(`supabase: ${error.message}`);
+  return data;
+}
 
 // ---------------------------------------------------------------------------
 // VAPID keys: from env, or generated once and persisted next to the server
@@ -39,37 +62,13 @@ webpush.setVapidDetails(
 );
 
 // ---------------------------------------------------------------------------
-// In-memory stores (swap for a database in production)
+// Password + token helpers
 // ---------------------------------------------------------------------------
-const users = new Map(); // id -> { id, email, passwordHash, salt }
-const sessions = new Map(); // sessionId -> session record
-const refreshIndex = new Map(); // sha256(refreshToken) -> { sessionId, used }
-const pushSubscriptions = new Map(); // endpoint -> { userId, subscription }
+const sha256 = (value) => crypto.createHash('sha256').update(value).digest('hex');
 
 function hashPassword(password, salt) {
   return crypto.scryptSync(password, salt, 64).toString('hex');
 }
-
-function createUser(email, password) {
-  const salt = crypto.randomBytes(16).toString('hex');
-  const user = {
-    id: `user_${crypto.randomUUID()}`,
-    email,
-    salt,
-    passwordHash: hashPassword(password, salt),
-  };
-  users.set(user.id, user);
-  return user;
-}
-
-// Demo account so the app is usable out of the box
-const demoUser = createUser('demo@example.com', 'demo1234');
-console.log(`Demo login: ${demoUser.email} / demo1234`);
-
-// ---------------------------------------------------------------------------
-// Token + session helpers
-// ---------------------------------------------------------------------------
-const sha256 = (value) => crypto.createHash('sha256').update(value).digest('hex');
 
 function issueAccessToken(user, sessionId) {
   return jwt.sign({ sub: user.id, email: user.email, sid: sessionId }, JWT_SECRET, {
@@ -77,34 +76,47 @@ function issueAccessToken(user, sessionId) {
   });
 }
 
-function issueRefreshToken(sessionId) {
-  const token = crypto.randomBytes(48).toString('base64url');
-  refreshIndex.set(sha256(token), { sessionId, used: false });
-  return token;
+async function createUser(email, password) {
+  const salt = crypto.randomBytes(16).toString('hex');
+  const { data, error } = await db
+    .from('users')
+    .insert({ email, salt, password_hash: hashPassword(password, salt) })
+    .select()
+    .single();
+  if (error?.code === '23505') return null; // unique_violation: email taken
+  if (error) throw new Error(`supabase: ${error.message}`);
+  return data;
 }
 
-function createSession(user, req) {
-  const session = {
-    id: `sess_${crypto.randomUUID()}`,
-    userId: user.id,
-    device: req.headers['user-agent'] || 'unknown',
-    ip: req.ip,
-    createdAt: new Date().toISOString(),
-    lastActive: new Date().toISOString(),
-    expiresAt: Date.now() + REFRESH_TOKEN_TTL_MS,
-    revoked: false,
-  };
-  sessions.set(session.id, session);
-  return session;
+async function getUserByEmail(email) {
+  return unwrap(await db.from('users').select().eq('email', email).maybeSingle());
 }
 
-function revokeSession(sessionId) {
-  const session = sessions.get(sessionId);
-  if (session) session.revoked = true;
+async function createSession(user, req) {
+  return unwrap(
+    await db
+      .from('sessions')
+      .insert({
+        user_id: user.id,
+        device: req.headers['user-agent'] || 'unknown',
+        ip: req.ip,
+        expires_at: new Date(Date.now() + REFRESH_TOKEN_TTL_MS).toISOString(),
+      })
+      .select()
+      .single(),
+  );
+}
+
+async function getSession(sessionId) {
+  return unwrap(await db.from('sessions').select().eq('id', sessionId).maybeSingle());
+}
+
+async function revokeSession(sessionId) {
+  unwrap(await db.from('sessions').update({ revoked: true }).eq('id', sessionId));
 }
 
 function sessionIsLive(session) {
-  return session && !session.revoked && session.expiresAt > Date.now();
+  return session && !session.revoked && new Date(session.expires_at) > new Date();
 }
 
 function setRefreshCookie(res, token) {
@@ -117,14 +129,35 @@ function setRefreshCookie(res, token) {
   });
 }
 
-function tokenResponse(res, user, session) {
-  session.lastActive = new Date().toISOString();
-  setRefreshCookie(res, issueRefreshToken(session.id));
+async function tokenResponse(res, user, session) {
+  const refreshToken = crypto.randomBytes(48).toString('base64url');
+  unwrap(
+    await db
+      .from('refresh_tokens')
+      .insert({ token_hash: sha256(refreshToken), session_id: session.id }),
+  );
+  unwrap(
+    await db
+      .from('sessions')
+      .update({ last_active: new Date().toISOString() })
+      .eq('id', session.id),
+  );
+  setRefreshCookie(res, refreshToken);
   res.json({
     access_token: issueAccessToken(user, session.id),
     token_type: 'Bearer',
     expires_in: 900,
   });
+}
+
+// ---------------------------------------------------------------------------
+// Demo account so the app is usable out of the box
+// ---------------------------------------------------------------------------
+async function ensureDemoUser() {
+  if (process.env.DISABLE_DEMO_USER) return;
+  const existing = await getUserByEmail('demo@example.com');
+  if (!existing) await createUser('demo@example.com', 'demo1234');
+  console.log('Demo login: demo@example.com / demo1234');
 }
 
 // ---------------------------------------------------------------------------
@@ -135,116 +168,144 @@ app.use(express.json());
 app.use(cookieParser());
 app.use(express.static(path.join(__dirname, 'public')));
 
-function requireAuth(req, res, next) {
+// Express 4 does not catch async errors — wrap every async handler
+const h = (fn) => (req, res, next) => Promise.resolve(fn(req, res, next)).catch(next);
+
+const requireAuth = h(async (req, res, next) => {
   const header = req.headers.authorization || '';
   const token = header.startsWith('Bearer ') ? header.slice(7) : null;
   if (!token) return res.status(401).json({ error: 'missing_token' });
 
+  let payload;
   try {
-    const payload = jwt.verify(token, JWT_SECRET);
-    const session = sessions.get(payload.sid);
-    if (!sessionIsLive(session)) {
-      return res.status(401).json({ error: 'session_revoked' });
-    }
-    session.lastActive = new Date().toISOString();
-    req.user = users.get(payload.sub);
-    req.session = session;
-    next();
+    payload = jwt.verify(token, JWT_SECRET);
   } catch (err) {
     const error = err.name === 'TokenExpiredError' ? 'token_expired' : 'invalid_token';
-    res.status(401).json({ error });
+    return res.status(401).json({ error });
   }
-}
+
+  const session = await getSession(payload.sid);
+  if (!sessionIsLive(session)) {
+    return res.status(401).json({ error: 'session_revoked' });
+  }
+  unwrap(
+    await db
+      .from('sessions')
+      .update({ last_active: new Date().toISOString() })
+      .eq('id', session.id),
+  );
+  req.user = { id: payload.sub, email: payload.email };
+  req.session = session;
+  next();
+});
 
 // ---------------------------------------------------------------------------
 // Auth routes
 // ---------------------------------------------------------------------------
-app.post('/auth/register', (req, res) => {
+app.post('/auth/register', h(async (req, res) => {
   const { email, password } = req.body || {};
   if (!email || !password || password.length < 8) {
     return res.status(400).json({ error: 'invalid_credentials', message: 'Email and a password of 8+ characters are required.' });
   }
-  if ([...users.values()].some((u) => u.email === email)) {
-    return res.status(409).json({ error: 'email_taken' });
-  }
-  const user = createUser(email, password);
-  tokenResponse(res.status(201), user, createSession(user, req));
-});
+  const user = await createUser(email, password);
+  if (!user) return res.status(409).json({ error: 'email_taken' });
+  await tokenResponse(res.status(201), user, await createSession(user, req));
+}));
 
-app.post('/auth/login', (req, res) => {
+app.post('/auth/login', h(async (req, res) => {
   const { email, password } = req.body || {};
-  const user = [...users.values()].find((u) => u.email === email);
+  const user = email ? await getUserByEmail(email) : null;
   const valid =
     user &&
     crypto.timingSafeEqual(
-      Buffer.from(user.passwordHash, 'hex'),
+      Buffer.from(user.password_hash, 'hex'),
       Buffer.from(hashPassword(password || '', user.salt), 'hex'),
     );
   if (!valid) return res.status(401).json({ error: 'invalid_credentials' });
 
-  tokenResponse(res, user, createSession(user, req));
-});
+  await tokenResponse(res, user, await createSession(user, req));
+}));
 
-app.post('/auth/refresh', (req, res) => {
+app.post('/auth/refresh', h(async (req, res) => {
   const token = req.cookies.refresh_token;
   if (!token) return res.status(401).json({ error: 'missing_refresh_token' });
+  const tokenHash = sha256(token);
 
-  const record = refreshIndex.get(sha256(token));
-  if (!record) return res.status(401).json({ error: 'invalid_refresh_token' });
+  // Atomically claim the token: the conditional update means two concurrent
+  // requests with the same token can never both succeed.
+  const claimed = unwrap(
+    await db
+      .from('refresh_tokens')
+      .update({ used: true })
+      .eq('token_hash', tokenHash)
+      .eq('used', false)
+      .select()
+      .maybeSingle(),
+  );
 
-  // Rotation with reuse detection: a token presented twice means it may have
-  // been stolen, so the whole session is revoked.
-  if (record.used) {
-    revokeSession(record.sessionId);
-    return res.status(401).json({ error: 'refresh_token_reused', message: 'Session revoked for safety. Log in again.' });
+  if (!claimed) {
+    const existing = unwrap(
+      await db.from('refresh_tokens').select().eq('token_hash', tokenHash).maybeSingle(),
+    );
+    // A known-but-used token means it may have been stolen — revoke the
+    // whole session (and with it every descendant refresh token).
+    if (existing) {
+      await revokeSession(existing.session_id);
+      return res.status(401).json({ error: 'refresh_token_reused', message: 'Session revoked for safety. Log in again.' });
+    }
+    return res.status(401).json({ error: 'invalid_refresh_token' });
   }
 
-  const session = sessions.get(record.sessionId);
+  const session = await getSession(claimed.session_id);
   if (!sessionIsLive(session)) return res.status(401).json({ error: 'session_expired' });
 
-  record.used = true;
-  tokenResponse(res, users.get(session.userId), session);
-});
+  const user = unwrap(await db.from('users').select().eq('id', session.user_id).single());
+  await tokenResponse(res, user, session);
+}));
 
-app.post('/auth/logout', requireAuth, (req, res) => {
-  revokeSession(req.session.id);
+app.post('/auth/logout', requireAuth, h(async (req, res) => {
+  await revokeSession(req.session.id);
   res.clearCookie('refresh_token', { path: '/auth' });
   res.json({ ok: true });
-});
+}));
 
-app.post('/auth/logout-all', requireAuth, (req, res) => {
-  for (const session of sessions.values()) {
-    if (session.userId === req.user.id) session.revoked = true;
-  }
+app.post('/auth/logout-all', requireAuth, h(async (req, res) => {
+  unwrap(await db.from('sessions').update({ revoked: true }).eq('user_id', req.user.id));
   res.clearCookie('refresh_token', { path: '/auth' });
   res.json({ ok: true });
-});
+}));
 
 // ---------------------------------------------------------------------------
 // Session management routes
 // ---------------------------------------------------------------------------
-app.get('/v1/sessions', requireAuth, (req, res) => {
-  const list = [...sessions.values()]
-    .filter((s) => s.userId === req.user.id && sessionIsLive(s))
-    .map((s) => ({
-      id: s.id,
-      device: s.device,
-      ip: s.ip,
-      created_at: s.createdAt,
-      last_active: s.lastActive,
-      current: s.id === req.session.id,
-    }));
-  res.json({ sessions: list });
-});
+app.get('/v1/sessions', requireAuth, h(async (req, res) => {
+  const rows = unwrap(
+    await db
+      .from('sessions')
+      .select('id, device, ip, created_at, last_active')
+      .eq('user_id', req.user.id)
+      .eq('revoked', false)
+      .gt('expires_at', new Date().toISOString())
+      .order('last_active', { ascending: false }),
+  );
+  res.json({
+    sessions: rows.map((s) => ({ ...s, current: s.id === req.session.id })),
+  });
+}));
 
-app.delete('/v1/sessions/:id', requireAuth, (req, res) => {
-  const session = sessions.get(req.params.id);
-  if (!session || session.userId !== req.user.id) {
-    return res.status(404).json({ error: 'session_not_found' });
-  }
-  revokeSession(session.id);
+app.delete('/v1/sessions/:id', requireAuth, h(async (req, res) => {
+  const updated = unwrap(
+    await db
+      .from('sessions')
+      .update({ revoked: true })
+      .eq('id', req.params.id)
+      .eq('user_id', req.user.id)
+      .select()
+      .maybeSingle(),
+  );
+  if (!updated) return res.status(404).json({ error: 'session_not_found' });
   res.json({ ok: true });
-});
+}));
 
 // ---------------------------------------------------------------------------
 // Push notification routes
@@ -253,31 +314,48 @@ app.get('/api/push/vapid-public-key', (req, res) => {
   res.json({ publicKey: vapidKeys.publicKey });
 });
 
-app.post('/api/push/subscribe', requireAuth, (req, res) => {
+app.post('/api/push/subscribe', requireAuth, h(async (req, res) => {
   const subscription = req.body;
   if (!subscription?.endpoint || !subscription?.keys) {
     return res.status(400).json({ error: 'invalid_subscription' });
   }
-  pushSubscriptions.set(subscription.endpoint, { userId: req.user.id, subscription });
+  unwrap(
+    await db
+      .from('push_subscriptions')
+      .upsert(
+        { endpoint: subscription.endpoint, user_id: req.user.id, subscription },
+        { onConflict: 'endpoint' },
+      ),
+  );
   res.status(201).json({ ok: true });
-});
+}));
 
-app.post('/api/push/unsubscribe', requireAuth, (req, res) => {
+app.post('/api/push/unsubscribe', requireAuth, h(async (req, res) => {
   const { endpoint } = req.body || {};
-  if (endpoint) pushSubscriptions.delete(endpoint);
+  if (endpoint) {
+    unwrap(
+      await db
+        .from('push_subscriptions')
+        .delete()
+        .eq('endpoint', endpoint)
+        .eq('user_id', req.user.id),
+    );
+  }
   res.json({ ok: true });
-});
+}));
 
-app.post('/api/push/send', requireAuth, async (req, res) => {
+app.post('/api/push/send', requireAuth, h(async (req, res) => {
   const { title = 'Notification', body = '', url = '/' } = req.body || {};
-  const mine = [...pushSubscriptions.values()].filter((s) => s.userId === req.user.id);
+  const rows = unwrap(
+    await db.from('push_subscriptions').select('subscription').eq('user_id', req.user.id),
+  );
 
   const results = await Promise.allSettled(
-    mine.map(({ subscription }) =>
-      webpush.sendNotification(subscription, JSON.stringify({ title, body, url })).catch((err) => {
+    rows.map(({ subscription }) =>
+      webpush.sendNotification(subscription, JSON.stringify({ title, body, url })).catch(async (err) => {
         // 404/410 mean the subscription is dead — drop it
         if (err.statusCode === 404 || err.statusCode === 410) {
-          pushSubscriptions.delete(subscription.endpoint);
+          await db.from('push_subscriptions').delete().eq('endpoint', subscription.endpoint);
         }
         throw err;
       }),
@@ -288,8 +366,22 @@ app.post('/api/push/send', requireAuth, async (req, res) => {
     sent: results.filter((r) => r.status === 'fulfilled').length,
     failed: results.filter((r) => r.status === 'rejected').length,
   });
+}));
+
+// ---------------------------------------------------------------------------
+// Error handler: never leak internals, always answer JSON
+// ---------------------------------------------------------------------------
+app.use((err, req, res, next) => {
+  console.error(err);
+  res.status(500).json({ error: 'internal_error' });
 });
 
-app.listen(PORT, () => {
-  console.log(`App running at http://localhost:${PORT}`);
-});
+ensureDemoUser()
+  .then(() => {
+    app.listen(PORT, () => console.log(`App running at http://localhost:${PORT}`));
+  })
+  .catch((err) => {
+    console.error('Failed to reach Supabase on boot:', err.message);
+    console.error('Check SUPABASE_URL / SUPABASE_SERVICE_ROLE_KEY and that db/schema.sql has been applied.');
+    process.exit(1);
+  });
