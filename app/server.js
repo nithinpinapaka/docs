@@ -344,15 +344,13 @@ app.post('/api/push/unsubscribe', requireAuth, h(async (req, res) => {
   res.json({ ok: true });
 }));
 
-app.post('/api/push/send', requireAuth, h(async (req, res) => {
-  const { title = 'Notification', body = '', url = '/' } = req.body || {};
+async function sendPushToUser(userId, payload) {
   const rows = unwrap(
-    await db.from('push_subscriptions').select('subscription').eq('user_id', req.user.id),
+    await db.from('push_subscriptions').select('subscription').eq('user_id', userId),
   );
-
   const results = await Promise.allSettled(
     rows.map(({ subscription }) =>
-      webpush.sendNotification(subscription, JSON.stringify({ title, body, url })).catch(async (err) => {
+      webpush.sendNotification(subscription, JSON.stringify(payload)).catch(async (err) => {
         // 404/410 mean the subscription is dead — drop it
         if (err.statusCode === 404 || err.statusCode === 410) {
           await db.from('push_subscriptions').delete().eq('endpoint', subscription.endpoint);
@@ -361,12 +359,168 @@ app.post('/api/push/send', requireAuth, h(async (req, res) => {
       }),
     ),
   );
-
-  res.json({
+  return {
     sent: results.filter((r) => r.status === 'fulfilled').length,
     failed: results.filter((r) => r.status === 'rejected').length,
-  });
+  };
+}
+
+app.post('/api/push/send', requireAuth, h(async (req, res) => {
+  const { title = 'Notification', body = '', url = '/' } = req.body || {};
+  res.json(await sendPushToUser(req.user.id, { title, body, url }));
 }));
+
+// ---------------------------------------------------------------------------
+// Notification settings (default: every reminder fires at 07:00 user-local)
+// ---------------------------------------------------------------------------
+const DEFAULT_SETTINGS = { notify_time: '07:00', tz_offset_minutes: 0 };
+const TIME_RE = /^([01]\d|2[0-3]):[0-5]\d$/;
+
+async function getSettings(userId) {
+  const row = unwrap(
+    await db.from('user_settings').select('notify_time, tz_offset_minutes').eq('user_id', userId).maybeSingle(),
+  );
+  return row ?? { ...DEFAULT_SETTINGS };
+}
+
+app.get('/v1/settings', requireAuth, h(async (req, res) => {
+  res.json(await getSettings(req.user.id));
+}));
+
+app.put('/v1/settings', requireAuth, h(async (req, res) => {
+  const { notify_time, tz_offset_minutes } = req.body || {};
+  if (notify_time !== undefined && !TIME_RE.test(notify_time)) {
+    return res.status(400).json({ error: 'invalid_time', message: 'notify_time must be HH:MM (24-hour).' });
+  }
+  if (tz_offset_minutes !== undefined && !(Number.isInteger(tz_offset_minutes) && Math.abs(tz_offset_minutes) <= 14 * 60)) {
+    return res.status(400).json({ error: 'invalid_timezone' });
+  }
+  const current = await getSettings(req.user.id);
+  const next = {
+    user_id: req.user.id,
+    notify_time: notify_time ?? current.notify_time,
+    tz_offset_minutes: tz_offset_minutes ?? current.tz_offset_minutes,
+    updated_at: new Date().toISOString(),
+  };
+  unwrap(await db.from('user_settings').upsert(next, { onConflict: 'user_id' }));
+  res.json({ notify_time: next.notify_time, tz_offset_minutes: next.tz_offset_minutes });
+}));
+
+// ---------------------------------------------------------------------------
+// Reminders: schedulable up to 6 days ahead, deletable until sent
+// ---------------------------------------------------------------------------
+const MAX_REMINDER_DAYS = 6;
+const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
+
+// "Today" as the user sees it, given their timezone offset
+function userLocalDate(tzOffsetMinutes, at = new Date()) {
+  return new Date(at.getTime() - tzOffsetMinutes * 60_000).toISOString().slice(0, 10);
+}
+
+function userLocalTime(tzOffsetMinutes, at = new Date()) {
+  return new Date(at.getTime() - tzOffsetMinutes * 60_000).toISOString().slice(11, 16);
+}
+
+app.get('/v1/reminders', requireAuth, h(async (req, res) => {
+  const rows = unwrap(
+    await db
+      .from('reminders')
+      .select('id, title, body, due_date, sent_at, created_at')
+      .eq('user_id', req.user.id)
+      .order('due_date', { ascending: true }),
+  );
+  res.json({ reminders: rows });
+}));
+
+app.post('/v1/reminders', requireAuth, h(async (req, res) => {
+  const { title, body = '', due_date } = req.body || {};
+  if (!title?.trim() || title.length > 120) {
+    return res.status(400).json({ error: 'invalid_title', message: 'Title is required (max 120 chars).' });
+  }
+  if (!DATE_RE.test(due_date ?? '') || Number.isNaN(Date.parse(due_date))) {
+    return res.status(400).json({ error: 'invalid_date', message: 'due_date must be YYYY-MM-DD.' });
+  }
+
+  const { tz_offset_minutes } = await getSettings(req.user.id);
+  const today = userLocalDate(tz_offset_minutes);
+  const max = userLocalDate(tz_offset_minutes, new Date(Date.now() + MAX_REMINDER_DAYS * 86_400_000));
+  if (due_date < today) {
+    return res.status(400).json({ error: 'date_in_past', message: 'due_date cannot be in the past.' });
+  }
+  if (due_date > max) {
+    return res.status(400).json({ error: 'date_too_far', message: `due_date can be at most ${MAX_REMINDER_DAYS} days ahead.` });
+  }
+
+  const reminder = unwrap(
+    await db
+      .from('reminders')
+      .insert({ user_id: req.user.id, title: title.trim(), body, due_date })
+      .select('id, title, body, due_date, sent_at, created_at')
+      .single(),
+  );
+  res.status(201).json(reminder);
+}));
+
+app.delete('/v1/reminders/:id', requireAuth, h(async (req, res) => {
+  const deleted = unwrap(
+    await db
+      .from('reminders')
+      .delete()
+      .eq('id', req.params.id)
+      .eq('user_id', req.user.id)
+      .select('id')
+      .maybeSingle(),
+  );
+  if (!deleted) return res.status(404).json({ error: 'reminder_not_found' });
+  res.json({ ok: true });
+}));
+
+// ---------------------------------------------------------------------------
+// Reminder scheduler: fires each due reminder at the user's notify time.
+// Claims rows with a conditional update so overlapping ticks (or multiple
+// server instances) never send the same reminder twice.
+// ---------------------------------------------------------------------------
+async function deliverDueReminders() {
+  const pending = unwrap(
+    await db
+      .from('reminders')
+      .select('id, user_id, title, body, due_date')
+      .is('sent_at', null)
+      .lte('due_date', userLocalDate(-14 * 60)), // cheap prefilter: earliest timezone's today
+  );
+  if (!pending.length) return;
+
+  const settingsCache = new Map();
+  for (const reminder of pending) {
+    if (!settingsCache.has(reminder.user_id)) {
+      settingsCache.set(reminder.user_id, await getSettings(reminder.user_id));
+    }
+    const { notify_time, tz_offset_minutes } = settingsCache.get(reminder.user_id);
+    const today = userLocalDate(tz_offset_minutes);
+    const now = userLocalTime(tz_offset_minutes);
+    const due = reminder.due_date < today || (reminder.due_date === today && now >= notify_time);
+    if (!due) continue;
+
+    const claimed = unwrap(
+      await db
+        .from('reminders')
+        .update({ sent_at: new Date().toISOString() })
+        .eq('id', reminder.id)
+        .is('sent_at', null)
+        .select('id')
+        .maybeSingle(),
+    );
+    if (!claimed) continue; // another instance got it first
+
+    await sendPushToUser(reminder.user_id, {
+      title: reminder.title,
+      body: reminder.body || `Reminder for ${reminder.due_date}`,
+      url: '/',
+    }).catch((err) => console.error('reminder push failed:', err.message));
+  }
+}
+
+setInterval(() => deliverDueReminders().catch((err) => console.error('scheduler:', err.message)), 60_000);
 
 // ---------------------------------------------------------------------------
 // Error handler: never leak internals, always answer JSON

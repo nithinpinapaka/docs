@@ -33,7 +33,26 @@ create table if not exists push_subscriptions (
   created_at timestamptz not null default now()
 );
 
+create table if not exists user_settings (
+  user_id uuid primary key references users(id) on delete cascade,
+  notify_time text not null default '07:00',        -- HH:MM, user-local
+  tz_offset_minutes integer not null default 0,     -- Date.getTimezoneOffset()
+  updated_at timestamptz not null default now()
+);
+
+create table if not exists reminders (
+  id uuid primary key default gen_random_uuid(),
+  user_id uuid not null references users(id) on delete cascade,
+  title text not null,
+  body text,
+  due_date date not null,                           -- fires at the user's notify_time
+  sent_at timestamptz,
+  created_at timestamptz not null default now()
+);
+
 create index if not exists sessions_user_idx on sessions (user_id);
+create index if not exists reminders_pending_idx on reminders (due_date) where sent_at is null;
+create index if not exists reminders_user_idx on reminders (user_id);
 create index if not exists refresh_tokens_session_idx on refresh_tokens (session_id);
 create index if not exists push_subscriptions_user_idx on push_subscriptions (user_id);
 
@@ -44,3 +63,5 @@ alter table users enable row level security;
 alter table sessions enable row level security;
 alter table refresh_tokens enable row level security;
 alter table push_subscriptions enable row level security;
+alter table user_settings enable row level security;
+alter table reminders enable row level security;

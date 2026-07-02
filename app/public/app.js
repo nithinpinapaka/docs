@@ -129,6 +129,79 @@ async function sendTestPush() {
 }
 
 // --------------------------------------------------------------------------
+// Notification settings + reminders
+// --------------------------------------------------------------------------
+async function loadSettings() {
+  const res = await api('/v1/settings');
+  if (res.ok) {
+    const { notify_time } = await res.json();
+    $('notify-time').value = notify_time;
+  }
+}
+
+async function saveSettings() {
+  const res = await api('/v1/settings', {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      notify_time: $('notify-time').value,
+      tz_offset_minutes: new Date().getTimezoneOffset(),
+    }),
+  });
+  setStatus(res.ok ? 'Settings saved.' : `Could not save: ${(await res.json()).message ?? 'error'}`);
+}
+
+function setReminderDateBounds() {
+  const fmt = (d) => d.toISOString().slice(0, 10);
+  const today = new Date();
+  const max = new Date(today.getTime() + 6 * 86_400_000);
+  $('reminder-date').min = fmt(today);
+  $('reminder-date').max = fmt(max);
+  $('reminder-date').value = fmt(today);
+}
+
+async function renderReminders() {
+  const res = await api('/v1/reminders');
+  if (!res.ok) return;
+  const { reminders } = await res.json();
+  $('reminders').innerHTML = reminders.length
+    ? reminders.map((r) => `
+        <div class="session">
+          <div>
+            <div>${r.title}</div>
+            <div class="meta">${r.due_date}${r.sent_at ? ' · sent' : ''}</div>
+          </div>
+          <button class="danger" data-del-reminder="${r.id}">Delete</button>
+        </div>
+      `).join('')
+    : '<p class="meta" style="font-size:.85rem;color:#5b6b73;">No reminders yet.</p>';
+
+  for (const btn of $('reminders').querySelectorAll('[data-del-reminder]')) {
+    btn.onclick = async () => {
+      await api(`/v1/reminders/${btn.dataset.delReminder}`, { method: 'DELETE' });
+      renderReminders();
+    };
+  }
+}
+
+async function addReminder() {
+  const title = $('reminder-title').value.trim();
+  if (!title) { setStatus('Reminder title is required.'); return; }
+  const res = await api('/v1/reminders', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ title, due_date: $('reminder-date').value }),
+  });
+  if (res.ok) {
+    $('reminder-title').value = '';
+    setStatus('Reminder added.');
+    renderReminders();
+  } else {
+    setStatus(`Could not add: ${(await res.json()).message ?? 'error'}`);
+  }
+}
+
+// --------------------------------------------------------------------------
 // Wiring
 // --------------------------------------------------------------------------
 function showApp(loggedIn) {
@@ -143,6 +216,9 @@ $('login-btn').onclick = async () => {
     $('whoami').textContent = `Logged in as ${$('email').value}`;
     showApp(true);
     renderSessions();
+    loadSettings();
+    setReminderDateBounds();
+    renderReminders();
   } catch (err) {
     setStatus(`Login failed: ${err.message}`);
   }
@@ -164,6 +240,8 @@ $('logout-all-btn').onclick = async () => {
 
 $('enable-push-btn').onclick = enablePush;
 $('test-push-btn').onclick = sendTestPush;
+$('save-settings-btn').onclick = saveSettings;
+$('add-reminder-btn').onclick = addReminder;
 
 // Boot: register SW, then try a silent refresh to restore the session
 (async () => {
@@ -174,5 +252,8 @@ $('test-push-btn').onclick = sendTestPush;
     $('whoami').textContent = 'Session restored';
     showApp(true);
     renderSessions();
+    loadSettings();
+    setReminderDateBounds();
+    renderReminders();
   }
 })();

@@ -1,3 +1,6 @@
+// Bump to force clients onto the new worker (and new notification icons)
+const SW_VERSION = 2;
+
 self.addEventListener('install', () => self.skipWaiting());
 self.addEventListener('activate', (event) => event.waitUntil(clients.claim()));
 
@@ -7,7 +10,8 @@ self.addEventListener('push', (event) => {
     self.registration.showNotification(data.title ?? 'Notification', {
       body: data.body ?? '',
       icon: '/icons/icon-192.png',
-      badge: '/icons/icon-192.png',
+      // badge is the Android status-bar icon: must be monochrome
+      badge: '/icons/badge-96.png',
       data: { url: data.url ?? '/' },
     }),
   );

@@ -53,6 +53,22 @@
     </div>
 
     <div class="card">
+      <h2>Notification settings</h2>
+      <label for="notify-time" style="font-size:.85rem;color:#5b6b73;">Daily reminder time</label>
+      <input id="notify-time" type="time" value="07:00">
+      <button id="save-settings-btn">Save</button>
+    </div>
+
+    <div class="card">
+      <h2>Reminders</h2>
+      <input id="reminder-title" type="text" maxlength="120" placeholder="What should we remind you about?">
+      <label for="reminder-date" style="font-size:.85rem;color:#5b6b73;">Date (up to 6 days ahead)</label>
+      <input id="reminder-date" type="date">
+      <button id="add-reminder-btn">Add reminder</button>
+      <div id="reminders" style="margin-top:.75rem;"></div>
+    </div>
+
+    <div class="card">
       <h2>Active sessions</h2>
       <div id="sessions"></div>
     </div>
