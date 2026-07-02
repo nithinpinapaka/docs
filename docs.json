@@ -49,6 +49,14 @@
               "authentication/refresh-tokens",
               "authentication/session-management"
             ]
+          },
+          {
+            "group": "Push Notifications",
+            "pages": [
+              "push-notifications/overview",
+              "push-notifications/setup",
+              "push-notifications/sending"
+            ]
           }
         ]
       },
